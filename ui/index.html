@@ -465,16 +465,49 @@ function renderUrlList() {
     const enabled = item.enabled !== false;
     const div = document.createElement('div');
     div.className = 'url-item' + (i === state.index ? ' current' : '') + (enabled ? '' : ' disabled');
-    div.draggable = true;
-    div.addEventListener('dragstart', e => onDragStart(e, i));
-    div.addEventListener('dragend', onDragEnd);
-    div.addEventListener('dragover', e => onDragOver(e, i));
-    div.addEventListener('dragleave', onDragLeave);
-    div.addEventListener('drop', e => onDrop(e, i));
+
+    // 핸들 mousedown 시에만 draggable 활성화
+    div.addEventListener('mousedown', e => {
+      div.setAttribute('draggable', e.target.closest('.drag-handle') ? 'true' : 'false');
+    });
+    div.addEventListener('dragstart', e => {
+      if (div.getAttribute('draggable') !== 'true') { e.preventDefault(); return; }
+      dragSrcIdx = i;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(i));
+      setTimeout(() => div.classList.add('dragging'), 0);
+    });
+    div.addEventListener('dragend', () => {
+      div.removeAttribute('draggable');
+      document.querySelectorAll('.url-item').forEach(el => el.classList.remove('dragging', 'drag-over'));
+    });
+    div.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.url-item').forEach((el, idx) => el.classList.toggle('drag-over', idx === i && idx !== dragSrcIdx));
+    });
+    div.addEventListener('dragleave', e => {
+      if (!div.contains(e.relatedTarget)) div.classList.remove('drag-over');
+    });
+    div.addEventListener('drop', e => {
+      e.preventDefault();
+      if (dragSrcIdx === null || dragSrcIdx === i) { dragSrcIdx = null; return; }
+      const moved = state.urls.splice(dragSrcIdx, 1)[0];
+      state.urls.splice(i, 0, moved);
+      if (state.index === dragSrcIdx) state.index = i;
+      else if (dragSrcIdx < state.index && i >= state.index) state.index--;
+      else if (dragSrcIdx > state.index && i <= state.index) state.index++;
+      dragSrcIdx = null;
+      saveSettings();
+      renderAll();
+      renderUrlList();
+      syncContentWindows();
+    });
     div.addEventListener('click', e => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
       state.index = i; renderAll(); resetTimer(); renderUrlList();
     });
+
     div.innerHTML = '<span class="drag-handle">⠿</span>'
       + '<input type="checkbox" class="url-cb"' + (enabled ? ' checked' : '') + '>'
       + '<div class="url-item-info">'
@@ -485,6 +518,7 @@ function renderUrlList() {
       + '<button class="url-cred-btn" onclick="openCredModal(' + i + ')">🔑</button>'
       + '<button class="url-del" onclick="delUrl(' + i + ')">✕</button>'
       + '</div>';
+
     const cb = div.querySelector('.url-cb');
     cb.addEventListener('change', async () => {
       state.urls[i].enabled = cb.checked;
@@ -497,10 +531,11 @@ function renderUrlList() {
       showIndex(state.index);
       saveSettings();
     });
+
     list.appendChild(div);
     divs.push(div);
   }
-  // cred 상태 비동기 업데이트 (렌더 블로킹 없음)
+
   state.urls.forEach((item, i) => {
     invoke('has_credentials', { key: credKey(item.url) }).then(hasCred => {
       const btn = divs[i] && divs[i].querySelector('.url-cred-btn');
@@ -539,25 +574,6 @@ function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&
 
 // ── Drag & Drop ──
 let dragSrcIdx = null;
-function onDragStart(e, i) {
-  dragSrcIdx = i; e.dataTransfer.effectAllowed = 'move';
-  setTimeout(() => { const els = document.querySelectorAll('.url-item'); if (els[i]) els[i].classList.add('dragging'); }, 0);
-}
-function onDragEnd() { document.querySelectorAll('.url-item').forEach(el => el.classList.remove('dragging', 'drag-over')); }
-function onDragOver(e, i) { e.preventDefault(); document.querySelectorAll('.url-item').forEach((el, idx) => el.classList.toggle('drag-over', idx === i && idx !== dragSrcIdx)); }
-function onDragLeave(e) { e.currentTarget.classList.remove('drag-over'); }
-function onDrop(e, ti) {
-  e.preventDefault();
-  if (dragSrcIdx === null || dragSrcIdx === ti) return;
-  const moved = state.urls.splice(dragSrcIdx, 1)[0];
-  state.urls.splice(ti, 0, moved);
-  if (state.index === dragSrcIdx) state.index = ti;
-  else if (dragSrcIdx < state.index && ti >= state.index) state.index--;
-  else if (dragSrcIdx > state.index && ti <= state.index) state.index++;
-  dragSrcIdx = null;
-  saveSettings();
-  syncContentWindows().then(() => { renderAll(); renderUrlList(); });
-}
 
 // ── Quick Add ──
 function quickKeydown(e) { if (e.key === 'Enter') quickAdd(); }
