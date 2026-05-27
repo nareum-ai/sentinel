@@ -260,8 +260,6 @@ const container = document.getElementById('webview-container');
 const emptyState = document.getElementById('empty-state');
 const loadingBadge = document.getElementById('loading-badge');
 let credModalIndex = null;
-let activeSlot = 0;
-
 // ── 자격증명 키 ──
 function credKey(url) {
   try { const u = new URL(url); return 'cred_' + u.hostname.replace(/\./g,'_'); }
@@ -368,73 +366,63 @@ function findEnabled(from, dir) {
   return -1;
 }
 
-// ── Webview 풀 (2슬롯) ──
-function initWebviewPool() {
-  for (let i = 0; i < 2; i++) {
-    const slot = document.createElement('div');
-    slot.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:none;';
-    const wv = document.createElement('webview');
-    wv.setAttribute('allowpopups','');
-    wv.setAttribute('src','about:blank');
-    wv.style.cssText = 'width:100%;height:100%;';
-    const idx = i;
-    wv.addEventListener('did-start-loading', () => { loadingBadge.textContent = '● 로딩중...'; });
-    wv.addEventListener('did-stop-loading', async () => {
-      loadingBadge.textContent = '';
-      const entry = state.webviews[idx];
-      if (entry) {
-        entry.loaded = true;
-        if (entry.urlIndex >= 0 && state.urls[entry.urlIndex] && !loginAttempted[idx]) {
-          loginAttempted[idx] = true;
-          await tryAutoLogin(wv, state.urls[entry.urlIndex].url);
-        }
-      }
-    });
-    slot.appendChild(wv);
-    container.appendChild(slot);
-    state.webviews.push({ slot, wv, urlIndex: -1, loaded: false });
-  }
-}
+// ── Webview 풀 (URL당 1슬롯) ──
+const loginAttempted = [];
 
-const loginAttempted = [false, false]; // 슬롯별 자동로그인 1회 제한
-
-function loadIntoSlot(slotIdx, urlIdx) {
-  const entry = state.webviews[slotIdx];
-  if (!entry || urlIdx < 0 || urlIdx >= state.urls.length) return;
-  if (entry.urlIndex === urlIdx) return;
-  const url = state.urls[urlIdx].url;
-  entry.urlIndex = urlIdx;
-  entry.loaded = false;
-  loginAttempted[slotIdx] = false; // 새 URL → 시도 플래그 리셋
-  entry.wv.setAttribute('src', url && url.startsWith('http') ? url : 'about:blank');
+function createWebviewEntry() {
+  const slot = document.createElement('div');
+  slot.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:none;';
+  const wv = document.createElement('webview');
+  wv.setAttribute('allowpopups','');
+  wv.setAttribute('src','about:blank');
+  wv.style.cssText = 'width:100%;height:100%;';
+  const entry = { slot, wv, url: '' };
+  wv.addEventListener('did-start-loading', () => { loadingBadge.textContent = '● 로딩중...'; });
+  wv.addEventListener('did-stop-loading', async () => {
+    loadingBadge.textContent = '';
+    const pos = state.webviews.indexOf(entry);
+    if (pos >= 0 && state.urls[pos] && !loginAttempted[pos]) {
+      loginAttempted[pos] = true;
+      await tryAutoLogin(wv, state.urls[pos].url);
+    }
+  });
+  slot.appendChild(wv);
+  container.appendChild(slot);
+  return entry;
 }
 
 function syncWebviews() {
-  if (!state.webviews.length) initWebviewPool();
   if (!state.urls.length) return;
-  loadIntoSlot(activeSlot, state.index);
-  if (state.urls.length > 1) {
-    const nextIdx = findEnabled(state.index, 1);
-    if (nextIdx >= 0) loadIntoSlot(1 - activeSlot, nextIdx);
+  // 풀 확장
+  while (state.webviews.length < state.urls.length) {
+    state.webviews.push(createWebviewEntry());
+    loginAttempted.push(false);
   }
+  // 풀 축소 (URL 삭제 시)
+  while (state.webviews.length > state.urls.length) {
+    const entry = state.webviews.pop();
+    loginAttempted.pop();
+    entry.wv.setAttribute('src', 'about:blank');
+    container.removeChild(entry.slot);
+  }
+  // URL 동기화 (변경된 슬롯만 재로드)
+  state.urls.forEach((urlItem, i) => {
+    const entry = state.webviews[i];
+    const url = urlItem.url && urlItem.url.startsWith('http') ? urlItem.url : 'about:blank';
+    if (entry.url !== url) {
+      entry.url = url;
+      loginAttempted[i] = false;
+      entry.wv.setAttribute('src', url);
+    }
+  });
 }
 
-// 항상 bgSlot(숨겨진 슬롯)에 먼저 로드 후 슬롯 전환 — 표시 중인 슬롯 src 변경 방지
 function showIndex(i) {
-  if (!state.urls.length || !state.webviews.length) return;
-  const bgSlot = 1 - activeSlot;
-  if (state.webviews[bgSlot] && state.webviews[bgSlot].urlIndex === i && state.webviews[bgSlot].loaded) {
-    activeSlot = bgSlot;
-  } else {
-    loadIntoSlot(activeSlot, i);
-  }
+  if (!state.urls.length) return;
+  if (!state.webviews.length) syncWebviews();
   state.webviews.forEach((entry, idx) => {
-    entry.slot.style.display = idx === activeSlot ? 'block' : 'none';
+    entry.slot.style.display = idx === i ? 'block' : 'none';
   });
-  if (state.urls.length > 1) {
-    const nextIdx = findEnabled(i, 1);
-    if (nextIdx >= 0) loadIntoSlot(1 - activeSlot, nextIdx);
-  }
 }
 
 // ── Drag & Drop ──
@@ -455,7 +443,6 @@ function onDrop(e, ti) {
   else if (dragSrcIdx<state.index&&ti>=state.index) state.index--;
   else if (dragSrcIdx>state.index&&ti<=state.index) state.index++;
   dragSrcIdx=null;
-  state.webviews.forEach(e=>{e.urlIndex=-1; e.loaded=false;});
   syncWebviews(); renderUrlList(); renderAll(); saveSettings();
 }
 
@@ -670,14 +657,7 @@ async function renderUrlList() {
 }
 function updateField(i,field,val){
   state.urls[i][field]=val;
-  if(field==='url'){
-    state.webviews.forEach(entry=>{
-      if(entry.urlIndex===i){
-        entry.urlIndex=-1;
-        if(entry.slot.style.display!=='none'&&val.startsWith('http')) entry.wv.setAttribute('src',val);
-      }
-    });
-  }
+  if(field==='url') syncWebviews();
   saveSettings(); renderAll();
 }
 function delUrl(i){
@@ -687,7 +667,6 @@ function delUrl(i){
     const ni=findEnabled(state.index,1);
     if(ni>=0) state.index=ni;
   }
-  state.webviews.forEach(e=>{e.urlIndex=-1; e.loaded=false;});
   syncWebviews(); renderUrlList(); renderAll(); saveSettings();
 }
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
