@@ -412,10 +412,8 @@ function syncWebviews(stagger = false) {
     if (entry.url !== url) {
       entry.url = url;
       loginAttempted[i] = false;
-      if (stagger && i !== state.index) {
-        const n = state.urls.length;
-        const dist = Math.min(Math.abs(i - state.index), n - Math.abs(i - state.index));
-        setTimeout(() => { if (entry.url === url) entry.wv.setAttribute('src', url); }, dist * 500);
+      if (stagger && i !== 0) {
+        setTimeout(() => { if (entry.url === url) entry.wv.setAttribute('src', url); }, i * 500);
       } else {
         entry.wv.setAttribute('src', url);
       }
@@ -518,7 +516,7 @@ async function loadSettings() {
   const saved=await ipcRenderer.invoke('load-settings',MONITOR_ID);
   if(saved){
     state.urls=saved.urls||[];
-    state.index=Math.min(saved.index||0,Math.max(0,(saved.urls||[]).length-1));
+    state.index=0;
     state.interval=saved.interval||10;
     state.theme=saved.theme||'dark';
     document.getElementById('interval-select').value=state.interval;
