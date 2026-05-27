@@ -36,8 +36,8 @@ struct ContentWindow {
 struct AppState {
     settings: Mutex<HashMap<String, MonitorSettings>>,
     settings_path: PathBuf,
-    // monitor_id -> content window 목록
     content_windows: Mutex<HashMap<String, Vec<ContentWindow>>>,
+    generation: Mutex<u32>,
 }
 
 impl AppState {
@@ -48,6 +48,7 @@ impl AppState {
             settings: Mutex::new(settings),
             settings_path: path,
             content_windows: Mutex::new(HashMap::new()),
+            generation: Mutex::new(0),
         }
     }
 
@@ -126,64 +127,47 @@ fn sync_content_windows(
     content_h: f64,
     app: AppHandle,
     state: State<AppState>,
-) {
-    // 현재 있는 content windows 가져오기
+) -> Result<(), String> {
+    // 기존 content windows 닫기
     let existing: Vec<ContentWindow> = state
         .content_windows
         .lock()
         .unwrap()
-        .get(&monitor_id)
-        .cloned()
+        .remove(&monitor_id)
         .unwrap_or_default();
 
-    // 불필요한 윈도우 제거
     for win in &existing {
         if let Some(w) = app.get_webview_window(&win.label) {
             let _ = w.close();
         }
     }
 
-    // 새 content windows 생성
+    // 새 generation 번호로 라벨 충돌 방지
+    let gen = {
+        let mut g = state.generation.lock().unwrap();
+        *g += 1;
+        *g
+    };
+
+    // 새 content windows 동기 생성 (스레드 없음 — 순서 보장)
     let mut new_windows = Vec::new();
     for (i, entry) in urls.iter().enumerate() {
-        let enabled = entry.enabled;
-        let url = if enabled && entry.url.starts_with("http") {
-            entry.url.clone()
-        } else {
-            continue; // disabled URLs skip
-        };
+        if !entry.enabled || !entry.url.starts_with("http") {
+            continue;
+        }
+        let label = format!("content-{}-{}-{}", monitor_id, gen, i);
+        let parsed_url = entry.url.parse::<url::Url>().map_err(|e| e.to_string())?;
 
-        let label = format!("content-{}-{}", monitor_id, i);
-        let parsed_url = match url.parse::<url::Url>() {
-            Ok(u) => u,
-            Err(_) => continue,
-        };
-
-        let delay = i as u64 * 500;
-        let label_clone = label.clone();
-        let _url_clone = url.clone();
-        let app_clone = app.clone();
-        let cx = content_x;
-        let cy = content_y;
-        let cw = content_w;
-        let ch = content_h;
-
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(delay));
-            let _ = WebviewWindowBuilder::new(
-                &app_clone,
-                &label_clone,
-                WebviewUrl::External(parsed_url),
-            )
-            .position(cx, cy)
-            .inner_size(cw, ch)
+        WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed_url))
+            .position(content_x, content_y)
+            .inner_size(content_w, content_h)
             .decorations(false)
             .skip_taskbar(true)
             .visible(false)
-            .build();
-        });
+            .build()
+            .map_err(|e| e.to_string())?;
 
-        new_windows.push(ContentWindow { label, url });
+        new_windows.push(ContentWindow { label, url: entry.url.clone() });
     }
 
     state
@@ -191,6 +175,8 @@ fn sync_content_windows(
         .lock()
         .unwrap()
         .insert(monitor_id, new_windows);
+
+    Ok(())
 }
 
 #[tauri::command]
