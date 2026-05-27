@@ -391,7 +391,7 @@ function createWebviewEntry() {
   return entry;
 }
 
-function syncWebviews() {
+function syncWebviews(stagger = false) {
   if (!state.urls.length) return;
   // 풀 확장
   while (state.webviews.length < state.urls.length) {
@@ -412,7 +412,13 @@ function syncWebviews() {
     if (entry.url !== url) {
       entry.url = url;
       loginAttempted[i] = false;
-      entry.wv.setAttribute('src', url);
+      if (stagger && i !== state.index) {
+        const n = state.urls.length;
+        const dist = Math.min(Math.abs(i - state.index), n - Math.abs(i - state.index));
+        setTimeout(() => { if (entry.url === url) entry.wv.setAttribute('src', url); }, dist * 500);
+      } else {
+        entry.wv.setAttribute('src', url);
+      }
     }
   });
 }
@@ -420,8 +426,11 @@ function syncWebviews() {
 function showIndex(i) {
   if (!state.urls.length) return;
   if (!state.webviews.length) syncWebviews();
-  state.webviews.forEach((entry, idx) => {
-    entry.slot.style.display = idx === i ? 'block' : 'none';
+  const entry = state.webviews[i];
+  if (entry && entry.url && entry.wv.getAttribute('src') !== entry.url)
+    entry.wv.setAttribute('src', entry.url);
+  state.webviews.forEach((e, idx) => {
+    e.slot.style.display = idx === i ? 'block' : 'none';
   });
 }
 
@@ -515,7 +524,7 @@ async function loadSettings() {
     document.getElementById('interval-select').value=state.interval;
     document.getElementById('st-interval').textContent='INTERVAL: '+fmtTime(state.interval);
   }
-  applyTheme(); syncWebviews(); renderAll(); resetTimer();
+  applyTheme(); syncWebviews(true); renderAll(); resetTimer();
 }
 function saveSettings() {
   ipcRenderer.send('save-settings',{monitorId:MONITOR_ID,settings:{urls:state.urls,index:state.index,interval:state.interval,theme:state.theme}});
