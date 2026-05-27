@@ -654,11 +654,27 @@ function saveSettings() {
 }
 
 // ── System ──
-async function toggleFullscreen() {
-  await invoke('toggle_fullscreen');
+function toast(msg, color) {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;top:52px;left:50%;transform:translateX(-50%);background:' + (color||'#c00') + ';color:#fff;padding:6px 16px;border-radius:4px;z-index:9999;font-family:monospace;font-size:12px;pointer-events:none;';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
 }
-async function minimizeApp() { await invoke('minimize_window'); }
-async function quitApp() { await invoke('quit_app'); }
+
+async function toggleFullscreen() {
+  try { await invoke('toggle_fullscreen', { monitorId: MONITOR_ID }); }
+  catch(e) { toast('fullscreen err: ' + e); }
+}
+async function minimizeApp() {
+  try { await invoke('minimize_window', { monitorId: MONITOR_ID }); }
+  catch(e) { toast('minimize err: ' + e); }
+}
+async function quitApp() {
+  toast('quit 호출중...', '#333');
+  try { await invoke('quit_app'); }
+  catch(e) { toast('quit err: ' + e); }
+}
 
 function updateFsOverlay(isFs) {
   document.getElementById('fs-overlay').classList.toggle('visible', isFs);
@@ -682,7 +698,7 @@ window.addEventListener('keydown', function(e) {
 }, true);
 
 listen('fullscreen-changed', (event) => { updateFsOverlay(event.payload); });
-invoke('get_fullscreen').then(isFs => { if (isFs !== null) updateFsOverlay(isFs); });
+invoke('get_fullscreen', { monitorId: MONITOR_ID }).then(isFs => { if (isFs !== null) updateFsOverlay(isFs); });
 
 loadSettings();
 initLayout();

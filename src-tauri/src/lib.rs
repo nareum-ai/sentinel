@@ -7,7 +7,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder,
+    WebviewWindowBuilder,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -250,20 +250,29 @@ fn delete_credentials(key: String) -> serde_json::Value {
 // ── Window management ──
 
 #[tauri::command]
-fn get_fullscreen(window: WebviewWindow) -> bool {
-    window.is_fullscreen().unwrap_or(false)
+fn get_fullscreen(monitor_id: String, app: AppHandle) -> bool {
+    let label = format!("monitor-{}", monitor_id);
+    app.get_webview_window(&label)
+        .and_then(|w| w.is_fullscreen().ok())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
-fn toggle_fullscreen(window: WebviewWindow) {
-    let next = !window.is_fullscreen().unwrap_or(false);
-    let _ = window.set_fullscreen(next);
-    let _ = window.emit("fullscreen-changed", next);
+fn toggle_fullscreen(monitor_id: String, app: AppHandle) {
+    let label = format!("monitor-{}", monitor_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let next = !w.is_fullscreen().unwrap_or(false);
+        let _ = w.set_fullscreen(next);
+        let _ = w.emit("fullscreen-changed", next);
+    }
 }
 
 #[tauri::command]
-fn minimize_window(window: WebviewWindow) {
-    let _ = window.minimize();
+fn minimize_window(monitor_id: String, app: AppHandle) {
+    let label = format!("monitor-{}", monitor_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.minimize();
+    }
 }
 
 #[tauri::command]
