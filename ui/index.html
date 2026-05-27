@@ -244,10 +244,14 @@
 </div>
 
 <script>
-const invoke = window.__TAURI__?.core?.invoke ?? (async (cmd, args) => {
-  console.warn('Tauri not available, cmd:', cmd, args);
-  return null;
-});
+const invoke = async (cmd, args) => {
+  try {
+    return await (window.__TAURI__?.core?.invoke ?? window.__TAURI_INVOKE__)?.(cmd, args);
+  } catch(e) {
+    console.error('[invoke]', cmd, e);
+    throw e;
+  }
+};
 const listen = window.__TAURI__?.event?.listen ?? (async () => () => {});
 
 const MONITOR_ID = window.__MONITOR_ID__ || '1';
@@ -464,7 +468,7 @@ function toggleSidebar() {
 async function renderUrlList() {
   const list = document.getElementById('url-list');
   list.innerHTML = '';
-  const credChecks = await Promise.all(state.urls.map(item => invoke('has_credentials', { key: credKey(item.url) })));
+  const credChecks = await Promise.all(state.urls.map(item => invoke('has_credentials', { key: credKey(item.url) }).catch(() => false)));
   for (let i = 0; i < state.urls.length; i++) {
     const item = state.urls[i];
     const enabled = item.enabled !== false;
@@ -549,14 +553,17 @@ function onDrop(e, ti) {
 
 // ── Quick Add ──
 function quickKeydown(e) { if (e.key === 'Enter') quickAdd(); }
-function quickAdd() {
+async function quickAdd() {
   const nameEl = document.getElementById('quick-name'), urlEl = document.getElementById('quick-url');
   const url = urlEl.value.trim();
   if (!url || url === 'https://') return;
   const name = nameEl.value.trim() || (() => { try { return new URL(url).hostname.replace('www.', '') } catch(e) { return url } })();
   state.urls.push({ name, url, enabled: true });
-  syncIframes(); renderUrlList(); saveSettings();
   nameEl.value = ''; urlEl.value = ''; urlEl.focus();
+  await renderUrlList();
+  saveSettings();
+  state.contentReady = false;
+  syncContentWindows().catch(console.error);
 }
 
 function handleUrlPaste(e) {
