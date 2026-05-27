@@ -17,8 +17,8 @@
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { background:transparent !important; }
   body { color:var(--text); font-family:sans-serif; height:100vh; overflow:hidden; display:flex; flex-direction:column; transition:color 0.3s; }
-  #topbar { display:flex; align-items:center; justify-content:space-between; padding:6px 14px; background:var(--panel); border-bottom:1px solid var(--border); height:44px; flex-shrink:0; gap:12px; -webkit-app-region:drag; }
-  #topbar button, #topbar select { -webkit-app-region:no-drag; }
+  #topbar { display:flex; align-items:center; justify-content:space-between; padding:6px 14px; background:var(--panel); border-bottom:1px solid var(--border); height:44px; flex-shrink:0; gap:12px; }
+  #topbar button, #topbar select { }
   .logo { font-family:'Segoe Script','Brush Script MT','Lucida Handwriting',cursive; font-size:22px; color:var(--accent); letter-spacing:1px; text-shadow:0 0 14px rgba(0,229,255,0.45); line-height:1; }
   .mon-badge { font-family:monospace; font-size:11px; color:var(--dim); border:1px solid var(--border); padding:2px 8px; border-radius:2px; }
   #topbar-center { flex:1; display:flex; align-items:center; gap:10px; max-width:480px; margin:0 auto; }
@@ -245,8 +245,10 @@
 
 <script>
 const invoke = (cmd, args) => {
-  const fn = window.__TAURI__?.core?.invoke || window.__TAURI_INVOKE__;
-  if (!fn) { console.error('[invoke] __TAURI__ not ready', cmd); return Promise.resolve(null); }
+  const fn = window.__TAURI__?.core?.invoke
+          || window.__TAURI_INTERNALS__?.invoke
+          || window.__TAURI_INVOKE__;
+  if (!fn) { console.error('[invoke] Tauri not available', cmd); return Promise.resolve(null); }
   return fn(cmd, args).catch(e => { console.error('[invoke]', cmd, e); throw e; });
 };
 const listen = window.__TAURI__?.event?.listen ?? (async () => () => {});

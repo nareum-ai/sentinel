@@ -193,7 +193,6 @@ fn show_content_window(monitor_id: String, index: usize, app: AppHandle, state: 
         if let Some(w) = app.get_webview_window(&win.label) {
             if i == index {
                 let _ = w.show();
-                let _ = w.set_focus();
             } else {
                 let _ = w.hide();
             }
