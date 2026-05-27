@@ -408,11 +408,12 @@ function syncWebviews(stagger = false) {
   // URL 동기화 (변경된 슬롯만 재로드)
   state.urls.forEach((urlItem, i) => {
     const entry = state.webviews[i];
-    const url = urlItem.url && urlItem.url.startsWith('http') ? urlItem.url : 'about:blank';
+    const enabled = urlItem.enabled !== false;
+    const url = enabled && urlItem.url && urlItem.url.startsWith('http') ? urlItem.url : 'about:blank';
     if (entry.url !== url) {
       entry.url = url;
       loginAttempted[i] = false;
-      if (stagger && i !== 0) {
+      if (stagger && url !== 'about:blank' && i !== 0) {
         setTimeout(() => { if (entry.url === url) entry.wv.setAttribute('src', url); }, i * 500);
       } else {
         entry.wv.setAttribute('src', url);
