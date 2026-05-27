@@ -244,13 +244,10 @@
 </div>
 
 <script>
-const invoke = async (cmd, args) => {
-  try {
-    return await (window.__TAURI__?.core?.invoke ?? window.__TAURI_INVOKE__)?.(cmd, args);
-  } catch(e) {
-    console.error('[invoke]', cmd, e);
-    throw e;
-  }
+const invoke = (cmd, args) => {
+  const fn = window.__TAURI__?.core?.invoke || window.__TAURI_INVOKE__;
+  if (!fn) { console.error('[invoke] __TAURI__ not ready', cmd); return Promise.resolve(null); }
+  return fn(cmd, args).catch(e => { console.error('[invoke]', cmd, e); throw e; });
 };
 const listen = window.__TAURI__?.event?.listen ?? (async () => () => {});
 
@@ -267,13 +264,13 @@ const state = {
 const emptyState = document.getElementById('empty-state');
 const loadingBadge = document.getElementById('loading-badge');
 let credModalIndex = null;
+let _syncPromise = null;
 
 function credKey(url) {
   try { const u = new URL(url); return 'cred_' + u.hostname.replace(/\./g,'_'); }
   catch(e) { return 'cred_' + url.replace(/[^a-z0-9]/gi,'_').substring(0,40); }
 }
 
-// 콘텐츠 영역 크기 (topbar 44px, statusbar 20px 제외)
 function getContentArea() {
   return {
     contentX: 0,
@@ -283,34 +280,26 @@ function getContentArea() {
   };
 }
 
-// ── WebviewWindow 풀 (URL당 별도 OS 창) ──
-async function syncContentWindows(stagger = false) {
-  if (!state.urls.length) {
-    await invoke('destroy_content_windows', { monitorId: MONITOR_ID });
-    return;
-  }
-  const { contentX, contentY, contentW, contentH } = getContentArea();
-  const urls = state.urls.map(u => ({
-    url: u.url || '',
-    enabled: u.enabled !== false
-  }));
-  loadingBadge.textContent = '● 로딩중...';
-  await invoke('sync_content_windows', {
-    monitorId: MONITOR_ID,
-    urls,
-    contentX,
-    contentY,
-    contentW,
-    contentH
-  });
-  state.contentReady = true;
-  loadingBadge.textContent = '';
+// ── WebviewWindow 풀 ── (직렬 실행 보장: 동시 호출 방지)
+function syncContentWindows() {
+  _syncPromise = (_syncPromise || Promise.resolve()).then(async () => {
+    state.contentReady = false;
+    if (!state.urls.length) {
+      await invoke('destroy_content_windows', { monitorId: MONITOR_ID });
+      return;
+    }
+    const { contentX, contentY, contentW, contentH } = getContentArea();
+    const urls = state.urls.map(u => ({ url: u.url || '', enabled: u.enabled !== false }));
+    loadingBadge.textContent = '● 로딩중...';
+    await invoke('sync_content_windows', { monitorId: MONITOR_ID, urls, contentX, contentY, contentW, contentH });
+    state.contentReady = true;
+    loadingBadge.textContent = '';
+  }).catch(e => { console.error('[sync]', e); loadingBadge.textContent = ''; });
+  return _syncPromise;
 }
 
 async function showIndex(i) {
-  if (!state.urls.length) return;
-  if (!state.contentReady) await syncContentWindows();
-  // 활성화된 URL만 카운트해서 실제 content window 인덱스 맞추기
+  if (!state.urls.length || !state.contentReady) return;
   const enabledIndices = state.urls
     .map((u, idx) => u.enabled !== false ? idx : -1)
     .filter(idx => idx >= 0);
@@ -465,14 +454,13 @@ function toggleSidebar() {
   if (state.sidebarOpen) { renderUrlList(); setTimeout(() => document.getElementById('quick-url').focus(), 300); }
 }
 
-async function renderUrlList() {
+function renderUrlList() {
   const list = document.getElementById('url-list');
   list.innerHTML = '';
-  const credChecks = await Promise.all(state.urls.map(item => invoke('has_credentials', { key: credKey(item.url) }).catch(() => false)));
+  const divs = [];
   for (let i = 0; i < state.urls.length; i++) {
     const item = state.urls[i];
     const enabled = item.enabled !== false;
-    const hasCred = credChecks[i];
     const div = document.createElement('div');
     div.className = 'url-item' + (i === state.index ? ' current' : '') + (enabled ? '' : ' disabled');
     div.draggable = true;
@@ -485,7 +473,6 @@ async function renderUrlList() {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
       state.index = i; renderAll(); resetTimer(); renderUrlList();
     });
-
     div.innerHTML = '<span class="drag-handle">⠿</span>'
       + '<input type="checkbox" class="url-cb"' + (enabled ? ' checked' : '') + '>'
       + '<div class="url-item-info">'
@@ -493,39 +480,57 @@ async function renderUrlList() {
       + '<input class="url-addr-in" value="' + esc(item.url) + '" placeholder="https://..." onchange="updateField(' + i + ',\'url\',this.value)">'
       + '</div>'
       + '<div class="url-actions">'
-      + '<button class="url-cred-btn' + (hasCred ? ' has-cred' : '') + '" onclick="openCredModal(' + i + ')">' + (hasCred ? '🔐' : '🔑') + '</button>'
+      + '<button class="url-cred-btn" onclick="openCredModal(' + i + ')">🔑</button>'
       + '<button class="url-del" onclick="delUrl(' + i + ')">✕</button>'
       + '</div>';
-
     const cb = div.querySelector('.url-cb');
-    cb.addEventListener('change', () => {
+    cb.addEventListener('change', async () => {
       state.urls[i].enabled = cb.checked;
       div.classList.toggle('disabled', !cb.checked);
       if (!cb.checked && state.index === i) {
         const ni = findEnabled(i, 1);
         if (ni >= 0) { state.index = ni; renderAll(); }
       }
-      state.contentReady = false; syncContentWindows(); saveSettings();
+      await syncContentWindows();
+      showIndex(state.index);
+      saveSettings();
     });
-
     list.appendChild(div);
+    divs.push(div);
+  }
+  // cred 상태 비동기 업데이트 (렌더 블로킹 없음)
+  state.urls.forEach((item, i) => {
+    invoke('has_credentials', { key: credKey(item.url) }).then(hasCred => {
+      const btn = divs[i] && divs[i].querySelector('.url-cred-btn');
+      if (!btn) return;
+      btn.textContent = hasCred ? '🔐' : '🔑';
+      btn.classList.toggle('has-cred', !!hasCred);
+    }).catch(() => {});
+  });
+}
+
+async function updateField(i, field, val) {
+  state.urls[i][field] = val;
+  saveSettings();
+  if (field === 'url') {
+    await syncContentWindows();
+    renderAll();
+  } else {
+    renderAll();
   }
 }
 
-function updateField(i, field, val) {
-  state.urls[i][field] = val;
-  if (field === 'url') { state.contentReady = false; syncContentWindows(); }
-  saveSettings(); renderAll();
-}
-
-function delUrl(i) {
+async function delUrl(i) {
   state.urls.splice(i, 1);
   if (state.index >= state.urls.length) state.index = Math.max(0, state.urls.length - 1);
   if (state.urls.length && state.urls[state.index] && state.urls[state.index].enabled === false) {
     const ni = findEnabled(state.index, 1);
     if (ni >= 0) state.index = ni;
   }
-  state.contentReady = false; syncContentWindows(); renderUrlList(); renderAll(); saveSettings();
+  saveSettings();
+  await syncContentWindows();
+  renderAll();
+  renderUrlList();
 }
 
 function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
@@ -548,7 +553,8 @@ function onDrop(e, ti) {
   else if (dragSrcIdx < state.index && ti >= state.index) state.index--;
   else if (dragSrcIdx > state.index && ti <= state.index) state.index++;
   dragSrcIdx = null;
-  state.contentReady = false; syncContentWindows(); renderUrlList(); renderAll(); saveSettings();
+  saveSettings();
+  syncContentWindows().then(() => { renderAll(); renderUrlList(); });
 }
 
 // ── Quick Add ──
@@ -560,10 +566,10 @@ async function quickAdd() {
   const name = nameEl.value.trim() || (() => { try { return new URL(url).hostname.replace('www.', '') } catch(e) { return url } })();
   state.urls.push({ name, url, enabled: true });
   nameEl.value = ''; urlEl.value = ''; urlEl.focus();
-  await renderUrlList();
   saveSettings();
-  state.contentReady = false;
-  syncContentWindows().catch(console.error);
+  await syncContentWindows();
+  renderAll();
+  renderUrlList();
 }
 
 function handleUrlPaste(e) {
@@ -574,16 +580,19 @@ function handleUrlPaste(e) {
 }
 
 function togglePasteBox() { document.getElementById('paste-box').classList.toggle('open'); }
-function pasteSubmit() {
+async function pasteSubmit() {
   const text = document.getElementById('paste-input').value.trim();
   if (!text) return;
   text.split('\n').map(l => l.trim()).filter(l => l && l.startsWith('http')).forEach(url => {
     let name = url; try { name = new URL(url).hostname.replace('www.', '') } catch(e) {}
     state.urls.push({ name, url, enabled: true });
   });
-  state.contentReady = false; syncContentWindows(); renderUrlList(); saveSettings();
   document.getElementById('paste-input').value = '';
   document.getElementById('paste-box').classList.remove('open');
+  saveSettings();
+  await syncContentWindows();
+  renderAll();
+  renderUrlList();
 }
 
 // ── Layout Modal ──
@@ -630,8 +639,8 @@ async function loadSettings() {
     document.getElementById('st-interval').textContent = 'INTERVAL: ' + fmtTime(state.interval);
   }
   applyTheme();
+  if (state.urls.length) await syncContentWindows();
   renderAll();
-  if (state.urls.length) { syncContentWindows(true).then(() => { showIndex(state.index); }); }
   resetTimer();
 }
 
