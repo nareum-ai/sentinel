@@ -569,9 +569,9 @@ async function quickAdd() {
   state.urls.push({ name, url, enabled: true });
   nameEl.value = ''; urlEl.value = ''; urlEl.focus();
   saveSettings();
-  await syncContentWindows();
   renderAll();
   renderUrlList();
+  await syncContentWindows();
 }
 
 function handleUrlPaste(e) {

@@ -118,7 +118,7 @@ struct UrlEntry {
 }
 
 #[tauri::command]
-fn sync_content_windows(
+async fn sync_content_windows(
     monitor_id: String,
     urls: Vec<UrlEntry>,
     content_x: f64,
@@ -126,7 +126,7 @@ fn sync_content_windows(
     content_w: f64,
     content_h: f64,
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
     // 기존 content windows 닫기
     let existing: Vec<ContentWindow> = state
@@ -180,7 +180,7 @@ fn sync_content_windows(
 }
 
 #[tauri::command]
-fn show_content_window(monitor_id: String, index: usize, app: AppHandle, state: State<AppState>) {
+async fn show_content_window(monitor_id: String, index: usize, app: AppHandle, state: State<'_, AppState>) -> Result<(), ()> {
     let windows = state
         .content_windows
         .lock()
@@ -198,10 +198,11 @@ fn show_content_window(monitor_id: String, index: usize, app: AppHandle, state: 
             }
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
-fn destroy_content_windows(monitor_id: String, app: AppHandle, state: State<AppState>) {
+async fn destroy_content_windows(monitor_id: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), ()> {
     let windows = state
         .content_windows
         .lock()
@@ -214,6 +215,7 @@ fn destroy_content_windows(monitor_id: String, app: AppHandle, state: State<AppS
             let _ = w.close();
         }
     }
+    Ok(())
 }
 
 // ── Credentials (Windows Credential Manager) ──
