@@ -1,0 +1,36 @@
+{
+  "name": "sentinel",
+  "version": "1.0.0",
+  "description": "IT 인프라 모니터링 화면 순환 표시 앱",
+  "author": "인프라지원파트",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.sentinel.monitor",
+    "productName": "Sentinel",
+    "compression": "store",
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "시스템 모니터링",
+      "installerLanguages": ["ko_KR"],
+      "language": "1042"
+    },
+    "files": ["main.js", "index.html", "THIRD_PARTY_NOTICES.txt", "node_modules/**/*"]
+  }
+}
