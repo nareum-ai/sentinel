@@ -15,7 +15,8 @@
     --green: #008844; --red: #cc2244;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:var(--bg); color:var(--text); font-family:sans-serif; height:100vh; overflow:hidden; display:flex; flex-direction:column; transition:background 0.3s,color 0.3s; }
+  html, body { background:transparent !important; }
+  body { color:var(--text); font-family:sans-serif; height:100vh; overflow:hidden; display:flex; flex-direction:column; transition:color 0.3s; }
   #topbar { display:flex; align-items:center; justify-content:space-between; padding:6px 14px; background:var(--panel); border-bottom:1px solid var(--border); height:44px; flex-shrink:0; gap:12px; -webkit-app-region:drag; }
   #topbar button, #topbar select { -webkit-app-region:no-drag; }
   .logo { font-family:'Segoe Script','Brush Script MT','Lucida Handwriting',cursive; font-size:22px; color:var(--accent); letter-spacing:1px; text-shadow:0 0 14px rgba(0,229,255,0.45); line-height:1; }
@@ -36,11 +37,8 @@
   #interval-select { background:var(--panel); border:1px solid var(--border); color:var(--text); font-family:monospace; font-size:11px; padding:2px 5px; border-radius:2px; cursor:pointer; outline:none; }
   .vdiv { width:1px; height:18px; background:var(--border); margin:0 2px; }
   #main-area { flex:1; display:flex; overflow:hidden; }
-  #view-area { flex:1; position:relative; overflow:hidden; background:var(--bg); }
-  #iframe-container { position:absolute; inset:0; }
-  .iframe-slot { position:absolute; inset:0; display:none; }
-  .iframe-slot iframe { width:100%; height:100%; border:none; background:#000; }
-  #empty-state { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--dim); z-index:5; }
+  #view-area { flex:1; position:relative; overflow:hidden; background:transparent; }
+  #empty-state { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--dim); z-index:5; background:var(--bg); }
   .empty-icon { font-size:48px; opacity:0.2; }
   .empty-text { font-size:15px; letter-spacing:2px; font-weight:600; }
   .empty-sub { font-family:monospace; font-size:10px; opacity:0.6; }
@@ -86,7 +84,7 @@
   .url-cred-btn.has-cred { border-color:var(--green); color:var(--green); }
   .url-del { background:none; border:none; color:var(--dim); cursor:pointer; font-size:13px; padding:2px 4px; }
   .url-del:hover { color:var(--red); }
-  #statusbar { height:20px; background:var(--panel); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 12px; gap:14px; flex-shrink:0; }
+  #statusbar { height:20px; background:var(--panel); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 12px; gap:14px; flex-shrink:0; position:relative; z-index:10; }
   .st-item { font-family:monospace; font-size:10px; color:var(--dim); display:flex; align-items:center; gap:4px; }
   .st-dot { width:5px; height:5px; border-radius:50%; background:var(--green); animation:blink 2s infinite; }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
@@ -156,7 +154,6 @@
 
 <div id="main-area">
 <div id="view-area">
-  <div id="iframe-container"></div>
   <div id="empty-state">
     <div class="empty-icon">⬡</div>
     <div class="empty-text">URL 없음</div>
@@ -259,10 +256,10 @@ document.getElementById('mon-badge').textContent = 'MON-' + MONITOR_ID;
 const state = {
   urls:[], index:0, playing:true, interval:10, sidebarOpen:false,
   timers:{main:null,progress:null}, progressStart:null,
-  iframes:[], theme:'dark', layoutMode:'single', displayCount:1, pendingLayout:null
+  theme:'dark', layoutMode:'single', displayCount:1, pendingLayout:null,
+  contentReady: false
 };
 
-const container = document.getElementById('iframe-container');
 const emptyState = document.getElementById('empty-state');
 const loadingBadge = document.getElementById('loading-badge');
 let credModalIndex = null;
@@ -272,58 +269,51 @@ function credKey(url) {
   catch(e) { return 'cred_' + url.replace(/[^a-z0-9]/gi,'_').substring(0,40); }
 }
 
-// ── iframe pool (URL당 1슬롯) ──
-function createIframeEntry() {
-  const slot = document.createElement('div');
-  slot.className = 'iframe-slot';
-  const fr = document.createElement('iframe');
-  fr.setAttribute('allowfullscreen', '');
-  fr.src = 'about:blank';
-  const entry = { slot, fr, url: '' };
-  fr.addEventListener('load', () => {
-    loadingBadge.textContent = '';
-  });
-  slot.appendChild(fr);
-  container.appendChild(slot);
-  return entry;
+// 콘텐츠 영역 크기 (topbar 44px, statusbar 20px 제외)
+function getContentArea() {
+  return {
+    contentX: 0,
+    contentY: 44,
+    contentW: window.innerWidth,
+    contentH: window.innerHeight - 64
+  };
 }
 
-function syncIframes(stagger = false) {
-  if (!state.urls.length) return;
-  while (state.iframes.length < state.urls.length) {
-    state.iframes.push(createIframeEntry());
+// ── WebviewWindow 풀 (URL당 별도 OS 창) ──
+async function syncContentWindows(stagger = false) {
+  if (!state.urls.length) {
+    await invoke('destroy_content_windows', { monitorId: MONITOR_ID });
+    return;
   }
-  while (state.iframes.length > state.urls.length) {
-    const entry = state.iframes.pop();
-    entry.fr.src = 'about:blank';
-    container.removeChild(entry.slot);
-  }
-  state.urls.forEach((urlItem, i) => {
-    const entry = state.iframes[i];
-    const enabled = urlItem.enabled !== false;
-    const url = enabled && urlItem.url && urlItem.url.startsWith('http') ? urlItem.url : 'about:blank';
-    if (entry.url !== url) {
-      entry.url = url;
-      if (stagger && url !== 'about:blank' && i !== 0) {
-        setTimeout(() => { if (entry.url === url) entry.fr.src = url; }, i * 500);
-      } else {
-        entry.fr.src = url;
-      }
-    }
+  const { contentX, contentY, contentW, contentH } = getContentArea();
+  const urls = state.urls.map(u => ({
+    url: u.url || '',
+    enabled: u.enabled !== false
+  }));
+  loadingBadge.textContent = '● 로딩중...';
+  await invoke('sync_content_windows', {
+    monitorId: MONITOR_ID,
+    urls,
+    contentX,
+    contentY,
+    contentW,
+    contentH
   });
+  state.contentReady = true;
+  loadingBadge.textContent = '';
 }
 
-function showIndex(i) {
+async function showIndex(i) {
   if (!state.urls.length) return;
-  if (!state.iframes.length) syncIframes();
-  const entry = state.iframes[i];
-  if (entry && entry.url && entry.fr.src !== entry.url) {
-    loadingBadge.textContent = '● 로딩중...';
-    entry.fr.src = entry.url;
+  if (!state.contentReady) await syncContentWindows();
+  // 활성화된 URL만 카운트해서 실제 content window 인덱스 맞추기
+  const enabledIndices = state.urls
+    .map((u, idx) => u.enabled !== false ? idx : -1)
+    .filter(idx => idx >= 0);
+  const contentIdx = enabledIndices.indexOf(i);
+  if (contentIdx >= 0) {
+    await invoke('show_content_window', { monitorId: MONITOR_ID, index: contentIdx });
   }
-  state.iframes.forEach((e, idx) => {
-    e.slot.style.display = idx === i ? 'block' : 'none';
-  });
 }
 
 // ── Credential Modal ──
@@ -511,7 +501,7 @@ async function renderUrlList() {
         const ni = findEnabled(i, 1);
         if (ni >= 0) { state.index = ni; renderAll(); }
       }
-      syncIframes(); saveSettings();
+      state.contentReady = false; syncContentWindows(); saveSettings();
     });
 
     list.appendChild(div);
@@ -520,7 +510,7 @@ async function renderUrlList() {
 
 function updateField(i, field, val) {
   state.urls[i][field] = val;
-  if (field === 'url') syncIframes();
+  if (field === 'url') { state.contentReady = false; syncContentWindows(); }
   saveSettings(); renderAll();
 }
 
@@ -531,7 +521,7 @@ function delUrl(i) {
     const ni = findEnabled(state.index, 1);
     if (ni >= 0) state.index = ni;
   }
-  syncIframes(); renderUrlList(); renderAll(); saveSettings();
+  state.contentReady = false; syncContentWindows(); renderUrlList(); renderAll(); saveSettings();
 }
 
 function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
@@ -554,7 +544,7 @@ function onDrop(e, ti) {
   else if (dragSrcIdx < state.index && ti >= state.index) state.index--;
   else if (dragSrcIdx > state.index && ti <= state.index) state.index++;
   dragSrcIdx = null;
-  syncIframes(); renderUrlList(); renderAll(); saveSettings();
+  state.contentReady = false; syncContentWindows(); renderUrlList(); renderAll(); saveSettings();
 }
 
 // ── Quick Add ──
@@ -584,7 +574,7 @@ function pasteSubmit() {
     let name = url; try { name = new URL(url).hostname.replace('www.', '') } catch(e) {}
     state.urls.push({ name, url, enabled: true });
   });
-  syncIframes(); renderUrlList(); saveSettings();
+  state.contentReady = false; syncContentWindows(); renderUrlList(); saveSettings();
   document.getElementById('paste-input').value = '';
   document.getElementById('paste-box').classList.remove('open');
 }
@@ -632,7 +622,10 @@ async function loadSettings() {
     document.getElementById('interval-select').value = state.interval;
     document.getElementById('st-interval').textContent = 'INTERVAL: ' + fmtTime(state.interval);
   }
-  applyTheme(); syncIframes(true); renderAll(); resetTimer();
+  applyTheme();
+  renderAll();
+  if (state.urls.length) { syncContentWindows(true).then(() => { showIndex(state.index); }); }
+  resetTimer();
 }
 
 function saveSettings() {

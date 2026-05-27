@@ -6,40 +6,48 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct UrlItem {
     url: String,
-    label: Option<String>,
+    name: Option<String>,
     enabled: Option<bool>,
     interval: Option<u64>,
-    #[serde(rename = "userSelector")]
-    user_selector: Option<String>,
-    #[serde(rename = "passSelector")]
-    pass_selector: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 struct MonitorSettings {
     urls: Vec<UrlItem>,
     interval: Option<u64>,
+    theme: Option<String>,
     layout: Option<String>,
+}
+
+// content window 정보
+#[derive(Debug, Clone)]
+struct ContentWindow {
+    label: String,
+    url: String,
 }
 
 struct AppState {
     settings: Mutex<HashMap<String, MonitorSettings>>,
     settings_path: PathBuf,
+    // monitor_id -> content window 목록
+    content_windows: Mutex<HashMap<String, Vec<ContentWindow>>>,
 }
 
 impl AppState {
     fn new() -> Self {
-        let path = dirs_path();
+        let path = data_path();
         let settings = load_settings_from_disk(&path);
         AppState {
             settings: Mutex::new(settings),
             settings_path: path,
+            content_windows: Mutex::new(HashMap::new()),
         }
     }
 
@@ -50,7 +58,7 @@ impl AppState {
     }
 }
 
-fn dirs_path() -> PathBuf {
+fn data_path() -> PathBuf {
     let mut p = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push("sentinel");
     let _ = fs::create_dir_all(&p);
@@ -68,24 +76,13 @@ fn load_settings_from_disk(path: &PathBuf) -> HashMap<String, MonitorSettings> {
 // ── IPC Commands ──
 
 #[tauri::command]
-fn load_settings(
-    monitor_id: String,
-    state: State<AppState>,
-) -> Option<MonitorSettings> {
-    let settings = state.settings.lock().unwrap();
-    settings.get(&monitor_id).cloned()
+fn load_settings(monitor_id: String, state: State<AppState>) -> Option<MonitorSettings> {
+    state.settings.lock().unwrap().get(&monitor_id).cloned()
 }
 
 #[tauri::command]
-fn save_settings(
-    monitor_id: String,
-    settings: MonitorSettings,
-    state: State<AppState>,
-) {
-    {
-        let mut map = state.settings.lock().unwrap();
-        map.insert(monitor_id, settings);
-    }
+fn save_settings(monitor_id: String, settings: MonitorSettings, state: State<AppState>) {
+    state.settings.lock().unwrap().insert(monitor_id, settings);
     state.save();
 }
 
@@ -96,7 +93,7 @@ fn get_layout_mode(state: State<AppState>) -> serde_json::Value {
         .get("layout")
         .and_then(|s| s.layout.clone())
         .unwrap_or_else(|| "single".to_string());
-    let display_count = get_display_count();
+    let display_count = 1usize; // simplified
     serde_json::json!({ "mode": mode, "displayCount": display_count })
 }
 
@@ -111,11 +108,134 @@ fn set_layout_mode(mode: String, state: State<AppState>, app: AppHandle) {
     launch_windows(&app, &mode);
 }
 
+// ── Content window management ──
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct UrlEntry {
+    url: String,
+    enabled: bool,
+}
+
+#[tauri::command]
+fn sync_content_windows(
+    monitor_id: String,
+    urls: Vec<UrlEntry>,
+    content_x: f64,
+    content_y: f64,
+    content_w: f64,
+    content_h: f64,
+    app: AppHandle,
+    state: State<AppState>,
+) {
+    // 현재 있는 content windows 가져오기
+    let existing: Vec<ContentWindow> = state
+        .content_windows
+        .lock()
+        .unwrap()
+        .get(&monitor_id)
+        .cloned()
+        .unwrap_or_default();
+
+    // 불필요한 윈도우 제거
+    for win in &existing {
+        if let Some(w) = app.get_webview_window(&win.label) {
+            let _ = w.close();
+        }
+    }
+
+    // 새 content windows 생성
+    let mut new_windows = Vec::new();
+    for (i, entry) in urls.iter().enumerate() {
+        let enabled = entry.enabled;
+        let url = if enabled && entry.url.starts_with("http") {
+            entry.url.clone()
+        } else {
+            continue; // disabled URLs skip
+        };
+
+        let label = format!("content-{}-{}", monitor_id, i);
+        let parsed_url = match url.parse::<url::Url>() {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+
+        let delay = i as u64 * 500;
+        let label_clone = label.clone();
+        let _url_clone = url.clone();
+        let app_clone = app.clone();
+        let cx = content_x;
+        let cy = content_y;
+        let cw = content_w;
+        let ch = content_h;
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            let _ = WebviewWindowBuilder::new(
+                &app_clone,
+                &label_clone,
+                WebviewUrl::External(parsed_url),
+            )
+            .position(cx, cy)
+            .inner_size(cw, ch)
+            .decorations(false)
+            .skip_taskbar(true)
+            .visible(false)
+            .build();
+        });
+
+        new_windows.push(ContentWindow { label, url });
+    }
+
+    state
+        .content_windows
+        .lock()
+        .unwrap()
+        .insert(monitor_id, new_windows);
+}
+
+#[tauri::command]
+fn show_content_window(monitor_id: String, index: usize, app: AppHandle, state: State<AppState>) {
+    let windows = state
+        .content_windows
+        .lock()
+        .unwrap()
+        .get(&monitor_id)
+        .cloned()
+        .unwrap_or_default();
+
+    for (i, win) in windows.iter().enumerate() {
+        if let Some(w) = app.get_webview_window(&win.label) {
+            if i == index {
+                let _ = w.show();
+                let _ = w.set_focus();
+            } else {
+                let _ = w.hide();
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn destroy_content_windows(monitor_id: String, app: AppHandle, state: State<AppState>) {
+    let windows = state
+        .content_windows
+        .lock()
+        .unwrap()
+        .remove(&monitor_id)
+        .unwrap_or_default();
+
+    for win in windows {
+        if let Some(w) = app.get_webview_window(&win.label) {
+            let _ = w.close();
+        }
+    }
+}
+
 // ── Credentials (Windows Credential Manager) ──
 
 #[tauri::command]
 fn save_credentials(key: String, username: String, password: String) -> serde_json::Value {
-    match save_cred_windows(&key, &username, &password) {
+    match cred_save(&key, &username, &password) {
         Ok(_) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
     }
@@ -123,7 +243,7 @@ fn save_credentials(key: String, username: String, password: String) -> serde_js
 
 #[tauri::command]
 fn load_credentials(key: String) -> Option<serde_json::Value> {
-    load_cred_windows(&key)
+    cred_load(&key)
         .ok()
         .flatten()
         .map(|(u, p)| serde_json::json!({ "username": u, "password": p }))
@@ -131,15 +251,12 @@ fn load_credentials(key: String) -> Option<serde_json::Value> {
 
 #[tauri::command]
 fn has_credentials(key: String) -> bool {
-    load_cred_windows(&key)
-        .ok()
-        .and_then(|x| x)
-        .is_some()
+    cred_load(&key).ok().and_then(|x| x).is_some()
 }
 
 #[tauri::command]
 fn delete_credentials(key: String) -> serde_json::Value {
-    match delete_cred_windows(&key) {
+    match cred_delete(&key) {
         Ok(_) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
     }
@@ -148,19 +265,19 @@ fn delete_credentials(key: String) -> serde_json::Value {
 // ── Window management ──
 
 #[tauri::command]
-fn get_fullscreen(window: tauri::WebviewWindow) -> bool {
+fn get_fullscreen(window: WebviewWindow) -> bool {
     window.is_fullscreen().unwrap_or(false)
 }
 
 #[tauri::command]
-fn toggle_fullscreen(window: tauri::WebviewWindow) {
+fn toggle_fullscreen(window: WebviewWindow) {
     let next = !window.is_fullscreen().unwrap_or(false);
     let _ = window.set_fullscreen(next);
     let _ = window.emit("fullscreen-changed", next);
 }
 
 #[tauri::command]
-fn minimize_window(window: tauri::WebviewWindow) {
+fn minimize_window(window: WebviewWindow) {
     let _ = window.minimize();
 }
 
@@ -169,47 +286,47 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-// ── Helper: launch windows based on mode ──
+// ── Launch windows ──
 
-fn get_display_count() -> usize {
-    // Tauri doesn't expose monitor list directly in commands easily;
-    // return a fixed count for now — UI uses this for dual-mode display
-    1
+fn get_layout_mode_str(state: &AppState) -> String {
+    state
+        .settings
+        .lock()
+        .unwrap()
+        .get("layout")
+        .and_then(|s| s.layout.clone())
+        .unwrap_or_else(|| "single".to_string())
 }
 
 fn launch_windows(app: &AppHandle, mode: &str) {
-    // Close all existing monitor windows and re-create
     for (label, win) in app.webview_windows() {
-        if label.starts_with("monitor-") {
+        if label.starts_with("monitor-") || label.starts_with("content-") {
             let _ = win.close();
         }
     }
 
-    let monitors: Vec<tauri::Monitor> = app.available_monitors()
-        .unwrap_or_default();
+    let monitors: Vec<tauri::Monitor> = app.available_monitors().unwrap_or_default();
 
     if mode == "dual" && monitors.len() >= 2 {
         for (i, monitor) in monitors.iter().take(2).enumerate() {
-            create_monitor_window(app, i + 1, Some(monitor));
+            create_control_window(app, i + 1, Some(monitor));
         }
     } else {
-        let primary = app.primary_monitor().unwrap_or_else(|_| None);
-        create_monitor_window(app, 1, primary.as_ref());
+        let primary = app.primary_monitor().unwrap_or(None);
+        create_control_window(app, 1, primary.as_ref());
     }
 }
 
-fn create_monitor_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Monitor>) {
+fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Monitor>) {
     let label = format!("monitor-{}", id);
-    let url = WebviewUrl::App("index.html".into());
 
-    let mut builder = WebviewWindowBuilder::new(app, &label, url)
+    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(format!("Sentinel - MON-{}", id))
         .decorations(false)
         .fullscreen(true)
-        .initialization_script(&format!(
-            "window.__MONITOR_ID__ = '{}';",
-            id
-        ));
+        .always_on_top(true)
+        .transparent(true)
+        .initialization_script(&format!("window.__MONITOR_ID__ = '{}';", id));
 
     if let Some(m) = monitor {
         let pos = m.position();
@@ -225,10 +342,10 @@ fn create_monitor_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Mon
 // ── Windows Credential Manager ──
 
 #[cfg(windows)]
-fn save_cred_windows(key: &str, username: &str, password: &str) -> Result<(), String> {
+fn cred_save(key: &str, username: &str, password: &str) -> Result<(), String> {
     use windows::core::PWSTR;
     use windows::Win32::Security::Credentials::{
-        CredWriteW, CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE,
+        CredWriteW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW,
     };
 
     let mut target: Vec<u16> = format!("sentinel:{}", key)
@@ -248,17 +365,13 @@ fn save_cred_windows(key: &str, username: &str, password: &str) -> Result<(), St
         ..Default::default()
     };
 
-    unsafe {
-        CredWriteW(&mut cred, 0).map_err(|e| e.to_string())
-    }
+    unsafe { CredWriteW(&mut cred, 0).map_err(|e| e.to_string()) }
 }
 
 #[cfg(windows)]
-fn load_cred_windows(key: &str) -> Result<Option<(String, String)>, String> {
+fn cred_load(key: &str) -> Result<Option<(String, String)>, String> {
     use windows::core::PCWSTR;
-    use windows::Win32::Security::Credentials::{
-        CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
-    };
+    use windows::Win32::Security::Credentials::{CredFree, CredReadW, CRED_TYPE_GENERIC, CREDENTIALW};
 
     let target: Vec<u16> = format!("sentinel:{}", key)
         .encode_utf16()
@@ -267,12 +380,9 @@ fn load_cred_windows(key: &str) -> Result<Option<(String, String)>, String> {
 
     unsafe {
         let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
-        let result = CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None, &mut pcred);
-
-        if result.is_err() {
+        if CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None, &mut pcred).is_err() {
             return Ok(None);
         }
-
         let cred = &*pcred;
         let username = cred.UserName.to_string().unwrap_or_default();
         let password = String::from_utf8_lossy(std::slice::from_raw_parts(
@@ -280,15 +390,13 @@ fn load_cred_windows(key: &str) -> Result<Option<(String, String)>, String> {
             cred.CredentialBlobSize as usize,
         ))
         .to_string();
-
         CredFree(pcred as *mut _);
-
         Ok(Some((username, password)))
     }
 }
 
 #[cfg(windows)]
-fn delete_cred_windows(key: &str) -> Result<(), String> {
+fn cred_delete(key: &str) -> Result<(), String> {
     use windows::core::PCWSTR;
     use windows::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
 
@@ -298,23 +406,22 @@ fn delete_cred_windows(key: &str) -> Result<(), String> {
         .collect();
 
     unsafe {
-        CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None)
-            .map_err(|e| e.to_string())
+        CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None).map_err(|e| e.to_string())
     }
 }
 
 #[cfg(not(windows))]
-fn save_cred_windows(_key: &str, _username: &str, _password: &str) -> Result<(), String> {
-    Err("Credential storage only supported on Windows".to_string())
+fn cred_save(_: &str, _: &str, _: &str) -> Result<(), String> {
+    Err("Windows only".to_string())
 }
 
 #[cfg(not(windows))]
-fn load_cred_windows(_key: &str) -> Result<Option<(String, String)>, String> {
+fn cred_load(_: &str) -> Result<Option<(String, String)>, String> {
     Ok(None)
 }
 
 #[cfg(not(windows))]
-fn delete_cred_windows(_key: &str) -> Result<(), String> {
+fn cred_delete(_: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -325,7 +432,6 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
         .setup(|app| {
-            // Build tray menu
             let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
             let single = MenuItem::with_id(app, "single", "싱글 모니터", true, None::<&str>)?;
             let dual = MenuItem::with_id(app, "dual", "듀얼 모니터", true, None::<&str>)?;
@@ -349,14 +455,8 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Launch monitor windows
             let state = app.state::<AppState>();
-            let mode = {
-                let map = state.settings.lock().unwrap();
-                map.get("layout")
-                    .and_then(|s| s.layout.clone())
-                    .unwrap_or_else(|| "single".to_string())
-            };
+            let mode = get_layout_mode_str(&state);
             launch_windows(app.handle(), &mode);
 
             Ok(())
@@ -366,6 +466,9 @@ pub fn run() {
             save_settings,
             get_layout_mode,
             set_layout_mode,
+            sync_content_windows,
+            show_content_window,
+            destroy_content_windows,
             save_credentials,
             load_credentials,
             has_credentials,
