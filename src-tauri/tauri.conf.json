@@ -10,6 +10,7 @@
   },
   "app": {
     "windows": [],
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     },
