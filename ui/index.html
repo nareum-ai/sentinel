@@ -15,9 +15,9 @@
     --green: #008844; --red: #cc2244;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { background:transparent !important; }
+  html, body { background:transparent !important; pointer-events:none; }
   body { color:var(--text); font-family:sans-serif; height:100vh; overflow:hidden; display:flex; flex-direction:column; transition:color 0.3s; }
-  #topbar { display:flex; align-items:center; justify-content:space-between; padding:6px 14px; background:var(--panel); border-bottom:1px solid var(--border); height:44px; flex-shrink:0; gap:12px; }
+  #topbar { display:flex; align-items:center; justify-content:space-between; padding:6px 14px; background:var(--panel); border-bottom:1px solid var(--border); height:44px; flex-shrink:0; gap:12px; pointer-events:all; }
   #topbar button, #topbar select { }
   .logo { font-family:'Segoe Script','Brush Script MT','Lucida Handwriting',cursive; font-size:22px; color:var(--accent); letter-spacing:1px; text-shadow:0 0 14px rgba(0,229,255,0.45); line-height:1; }
   .mon-badge { font-family:monospace; font-size:11px; color:var(--dim); border:1px solid var(--border); padding:2px 8px; border-radius:2px; }
@@ -38,11 +38,11 @@
   .vdiv { width:1px; height:18px; background:var(--border); margin:0 2px; }
   #main-area { flex:1; display:flex; overflow:hidden; }
   #view-area { flex:1; position:relative; overflow:hidden; background:transparent; }
-  #empty-state { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--dim); z-index:5; background:var(--bg); }
+  #empty-state { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--dim); z-index:5; background:var(--bg); pointer-events:all; }
   .empty-icon { font-size:48px; opacity:0.2; }
   .empty-text { font-size:15px; letter-spacing:2px; font-weight:600; }
   .empty-sub { font-family:monospace; font-size:10px; opacity:0.6; }
-  #sidebar { width:0; overflow:hidden; background:var(--panel); border-left:1px solid var(--border); flex-shrink:0; display:flex; flex-direction:column; transition:width 0.22s ease; }
+  #sidebar { width:0; overflow:hidden; background:var(--panel); border-left:1px solid var(--border); flex-shrink:0; display:flex; flex-direction:column; transition:width 0.22s ease; pointer-events:all; }
   #sidebar.open { width:340px; }
   .sb-header { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
   .sb-title { font-size:12px; font-weight:700; letter-spacing:2px; color:var(--accent); }
@@ -84,14 +84,14 @@
   .url-cred-btn.has-cred { border-color:var(--green); color:var(--green); }
   .url-del { background:none; border:none; color:var(--dim); cursor:pointer; font-size:13px; padding:2px 4px; }
   .url-del:hover { color:var(--red); }
-  #statusbar { height:20px; background:var(--panel); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 12px; gap:14px; flex-shrink:0; position:relative; z-index:10; }
+  #statusbar { height:20px; background:var(--panel); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 12px; gap:14px; flex-shrink:0; position:relative; z-index:10; pointer-events:all; }
   .st-item { font-family:monospace; font-size:10px; color:var(--dim); display:flex; align-items:center; gap:4px; }
   .st-dot { width:5px; height:5px; border-radius:50%; background:var(--green); animation:blink 2s infinite; }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
   #clock { margin-left:auto; font-family:monospace; font-size:10px; color:var(--dim); }
   .hint { font-family:monospace; font-size:10px; color:var(--dim); opacity:0.5; }
   .loading-badge { font-family:monospace; font-size:10px; color:var(--accent); opacity:0.7; }
-  .modal-wrap { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:50; align-items:center; justify-content:center; }
+  .modal-wrap { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:50; align-items:center; justify-content:center; pointer-events:all; }
   .modal-wrap.open { display:flex; }
   .modal-box { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:22px; width:310px; }
   .modal-title { font-size:13px; font-weight:700; letter-spacing:2px; color:var(--accent); margin-bottom:14px; }
@@ -260,54 +260,38 @@ const state = {
   urls:[], index:0, playing:true, interval:10, sidebarOpen:false,
   timers:{main:null,progress:null}, progressStart:null,
   theme:'dark', layoutMode:'single', displayCount:1, pendingLayout:null,
-  contentReady: false
 };
 
 const emptyState = document.getElementById('empty-state');
 const loadingBadge = document.getElementById('loading-badge');
 let credModalIndex = null;
-let _syncPromise = null;
 
 function credKey(url) {
   try { const u = new URL(url); return 'cred_' + u.hostname.replace(/\./g,'_'); }
   catch(e) { return 'cred_' + url.replace(/[^a-z0-9]/gi,'_').substring(0,40); }
 }
 
-function getContentArea() {
-  return {
-    contentX: 0,
-    contentY: 44,
-    contentW: window.innerWidth,
-    contentH: window.innerHeight - 64
-  };
+// ── Content webview 네비게이션 (multi-webview 구조) ──
+async function navigateContent(url) {
+  try {
+    await invoke('navigate_content', { monitorId: MONITOR_ID, url: url || '' });
+  } catch(e) {
+    console.error('[navigate]', e);
+  }
 }
 
-// ── WebviewWindow 풀 ── (직렬 실행 보장: 동시 호출 방지)
-function syncContentWindows() {
-  _syncPromise = (_syncPromise || Promise.resolve()).then(async () => {
-    state.contentReady = false;
-    if (!state.urls.length) {
-      await invoke('destroy_content_windows', { monitorId: MONITOR_ID });
-      return;
-    }
-    const { contentX, contentY, contentW, contentH } = getContentArea();
-    const urls = state.urls.map(u => ({ url: u.url || '', enabled: u.enabled !== false }));
-    loadingBadge.textContent = '● 로딩중...';
-    await invoke('sync_content_windows', { monitorId: MONITOR_ID, urls, contentX, contentY, contentW, contentH });
-    state.contentReady = true;
-    loadingBadge.textContent = '';
-  }).catch(e => { console.error('[sync]', e); loadingBadge.textContent = ''; });
-  return _syncPromise;
-}
-
-async function showIndex(i) {
-  if (!state.urls.length || !state.contentReady) return;
-  const enabledIndices = state.urls
-    .map((u, idx) => u.enabled !== false ? idx : -1)
-    .filter(idx => idx >= 0);
-  const contentIdx = enabledIndices.indexOf(i);
-  if (contentIdx >= 0) {
-    await invoke('show_content_window', { monitorId: MONITOR_ID, index: contentIdx });
+function showCurrentUrl() {
+  if (!state.urls.length) {
+    navigateContent('');
+    return;
+  }
+  const item = state.urls[state.index];
+  if (item && item.enabled !== false && item.url) {
+    navigateContent(item.url);
+  } else {
+    const ni = findEnabled(state.index, 1);
+    if (ni >= 0) navigateContent(state.urls[ni].url);
+    else navigateContent('');
   }
 }
 
@@ -420,9 +404,9 @@ function fmtTime(s) { return s >= 60 ? (s / 60) + 'm' : s + 's'; }
 function renderAll() {
   const has = state.urls.length > 0;
   emptyState.style.display = has ? 'none' : 'flex';
+  showCurrentUrl();
   if (has) {
-    showIndex(state.index);
-    document.getElementById('current-title').textContent = state.urls[state.index].name || state.urls[state.index].url;
+    document.getElementById('current-title').textContent = state.urls[state.index]?.name || state.urls[state.index]?.url || '—';
     document.getElementById('counter').textContent = (state.index + 1) + ' / ' + state.urls.length;
   } else {
     document.getElementById('current-title').textContent = '—';
@@ -501,7 +485,6 @@ function renderUrlList() {
       saveSettings();
       renderAll();
       renderUrlList();
-      syncContentWindows();
     });
     div.addEventListener('click', e => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
@@ -520,16 +503,15 @@ function renderUrlList() {
       + '</div>';
 
     const cb = div.querySelector('.url-cb');
-    cb.addEventListener('change', async () => {
+    cb.addEventListener('change', () => {
       state.urls[i].enabled = cb.checked;
       div.classList.toggle('disabled', !cb.checked);
       if (!cb.checked && state.index === i) {
         const ni = findEnabled(i, 1);
-        if (ni >= 0) { state.index = ni; renderAll(); }
+        if (ni >= 0) state.index = ni;
       }
-      await syncContentWindows();
-      showIndex(state.index);
       saveSettings();
+      renderAll();
     });
 
     list.appendChild(div);
@@ -546,18 +528,13 @@ function renderUrlList() {
   });
 }
 
-async function updateField(i, field, val) {
+function updateField(i, field, val) {
   state.urls[i][field] = val;
   saveSettings();
-  if (field === 'url') {
-    await syncContentWindows();
-    renderAll();
-  } else {
-    renderAll();
-  }
+  renderAll();
 }
 
-async function delUrl(i) {
+function delUrl(i) {
   state.urls.splice(i, 1);
   if (state.index >= state.urls.length) state.index = Math.max(0, state.urls.length - 1);
   if (state.urls.length && state.urls[state.index] && state.urls[state.index].enabled === false) {
@@ -565,7 +542,6 @@ async function delUrl(i) {
     if (ni >= 0) state.index = ni;
   }
   saveSettings();
-  await syncContentWindows();
   renderAll();
   renderUrlList();
 }
@@ -577,7 +553,7 @@ let dragSrcIdx = null;
 
 // ── Quick Add ──
 function quickKeydown(e) { if (e.key === 'Enter') quickAdd(); }
-async function quickAdd() {
+function quickAdd() {
   const nameEl = document.getElementById('quick-name'), urlEl = document.getElementById('quick-url');
   const url = urlEl.value.trim();
   if (!url || url === 'https://') return;
@@ -587,7 +563,6 @@ async function quickAdd() {
   saveSettings();
   renderAll();
   renderUrlList();
-  await syncContentWindows();
 }
 
 function handleUrlPaste(e) {
@@ -598,7 +573,7 @@ function handleUrlPaste(e) {
 }
 
 function togglePasteBox() { document.getElementById('paste-box').classList.toggle('open'); }
-async function pasteSubmit() {
+function pasteSubmit() {
   const text = document.getElementById('paste-input').value.trim();
   if (!text) return;
   text.split('\n').map(l => l.trim()).filter(l => l && l.startsWith('http')).forEach(url => {
@@ -608,7 +583,6 @@ async function pasteSubmit() {
   document.getElementById('paste-input').value = '';
   document.getElementById('paste-box').classList.remove('open');
   saveSettings();
-  await syncContentWindows();
   renderAll();
   renderUrlList();
 }
@@ -657,9 +631,10 @@ async function loadSettings() {
     document.getElementById('st-interval').textContent = 'INTERVAL: ' + fmtTime(state.interval);
   }
   applyTheme();
-  if (state.urls.length) await syncContentWindows();
   renderAll();
   resetTimer();
+  // 백화현상 방지: 설정 로드 완료 후 창 표시
+  await invoke('show_window', { monitorId: MONITOR_ID });
 }
 
 function saveSettings() {

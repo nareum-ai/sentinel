@@ -26,18 +26,9 @@ struct MonitorSettings {
     layout: Option<String>,
 }
 
-// content window 정보
-#[derive(Debug, Clone)]
-struct ContentWindow {
-    label: String,
-    url: String,
-}
-
 struct AppState {
     settings: Mutex<HashMap<String, MonitorSettings>>,
     settings_path: PathBuf,
-    content_windows: Mutex<HashMap<String, Vec<ContentWindow>>>,
-    generation: Mutex<u32>,
 }
 
 impl AppState {
@@ -47,8 +38,6 @@ impl AppState {
         AppState {
             settings: Mutex::new(settings),
             settings_path: path,
-            content_windows: Mutex::new(HashMap::new()),
-            generation: Mutex::new(0),
         }
     }
 
@@ -88,13 +77,15 @@ fn save_settings(monitor_id: String, settings: MonitorSettings, state: State<App
 }
 
 #[tauri::command]
-fn get_layout_mode(state: State<AppState>) -> serde_json::Value {
+fn get_layout_mode(state: State<AppState>, app: AppHandle) -> serde_json::Value {
     let settings = state.settings.lock().unwrap();
     let mode = settings
         .get("layout")
         .and_then(|s| s.layout.clone())
         .unwrap_or_else(|| "single".to_string());
-    let display_count = 1usize; // simplified
+    let display_count = app.available_monitors()
+        .map(|m| m.len())
+        .unwrap_or(1);
     serde_json::json!({ "mode": mode, "displayCount": display_count })
 }
 
@@ -106,116 +97,48 @@ fn set_layout_mode(mode: String, state: State<AppState>, app: AppHandle) {
         entry.layout = Some(mode.clone());
     }
     state.save();
-    launch_windows(&app, &mode);
+
+    // IPC 응답 완료 후 창 전환 — 자기 창을 닫으면서 앱이 꺼지는 버그 방지
+    let app_handle = app.app_handle().clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let handle = app_handle.clone();
+        let _ = app_handle.run_on_main_thread(move || {
+            launch_windows(&handle, &mode);
+        });
+    });
 }
 
-// ── Content window management ──
+// ── Content window navigation ──
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct UrlEntry {
-    url: String,
-    enabled: bool,
-}
-
+// Content window는 monitor당 1개만 유지하고 URL을 navigate해서 전환
+// → 창 destroy/recreate 없음 → 투명 플래시 없음
 #[tauri::command]
-async fn sync_content_windows(
+async fn navigate_content(
     monitor_id: String,
-    urls: Vec<UrlEntry>,
-    content_x: f64,
-    content_y: f64,
-    content_w: f64,
-    content_h: f64,
+    url: String,
     app: AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // 기존 content windows 닫기
-    let existing: Vec<ContentWindow> = state
-        .content_windows
-        .lock()
-        .unwrap()
-        .remove(&monitor_id)
-        .unwrap_or_default();
-
-    for win in &existing {
-        if let Some(w) = app.get_webview_window(&win.label) {
-            let _ = w.close();
-        }
-    }
-
-    // 새 generation 번호로 라벨 충돌 방지
-    let gen = {
-        let mut g = state.generation.lock().unwrap();
-        *g += 1;
-        *g
-    };
-
-    // 새 content windows 동기 생성 (스레드 없음 — 순서 보장)
-    let mut new_windows = Vec::new();
-    for (i, entry) in urls.iter().enumerate() {
-        if !entry.enabled || !entry.url.starts_with("http") {
-            continue;
-        }
-        let label = format!("content-{}-{}-{}", monitor_id, gen, i);
-        let parsed_url = entry.url.parse::<url::Url>().map_err(|e| e.to_string())?;
-
-        WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed_url))
-            .position(content_x, content_y)
-            .inner_size(content_w, content_h)
-            .decorations(false)
-            .skip_taskbar(true)
-            .visible(false)
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        new_windows.push(ContentWindow { label, url: entry.url.clone() });
-    }
-
-    state
-        .content_windows
-        .lock()
-        .unwrap()
-        .insert(monitor_id, new_windows);
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn show_content_window(monitor_id: String, index: usize, app: AppHandle, state: State<'_, AppState>) -> Result<(), ()> {
-    let windows = state
-        .content_windows
-        .lock()
-        .unwrap()
-        .get(&monitor_id)
-        .cloned()
-        .unwrap_or_default();
-
-    for (i, win) in windows.iter().enumerate() {
-        if let Some(w) = app.get_webview_window(&win.label) {
-            if i == index {
-                let _ = w.show();
-            } else {
-                let _ = w.hide();
-            }
-        }
+    let label = format!("content-{}", monitor_id);
+    if let Some(wv) = app.get_webview_window(&label) {
+        let target: url::Url = if url.starts_with("http") {
+            url.parse::<url::Url>().map_err(|e| e.to_string())?
+        } else {
+            "about:blank".parse().unwrap()
+        };
+        wv.navigate(target).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
+// 백화현상 방지: JS loadSettings 완료 후 창 표시
 #[tauri::command]
-async fn destroy_content_windows(monitor_id: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), ()> {
-    let windows = state
-        .content_windows
-        .lock()
-        .unwrap()
-        .remove(&monitor_id)
-        .unwrap_or_default();
-
-    for win in windows {
-        if let Some(w) = app.get_webview_window(&win.label) {
-            let _ = w.close();
-        }
+fn show_window(monitor_id: String, app: AppHandle) {
+    let label = format!("monitor-{}", monitor_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.show();
+        let _ = w.set_focus();
     }
-    Ok(())
 }
 
 // ── Credentials (Windows Credential Manager) ──
@@ -309,34 +232,66 @@ fn launch_windows(app: &AppHandle, mode: &str) {
         }
     } else {
         let primary = app.primary_monitor().unwrap_or(None);
-        create_control_window(app, 1, primary.as_ref());
+        let monitor = primary.or_else(|| monitors.into_iter().next());
+        create_control_window(app, 1, monitor.as_ref());
     }
 }
 
 fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Monitor>) {
-    let label = format!("monitor-{}", id);
+    let mon_label = format!("monitor-{}", id);
+    let content_label = format!("content-{}", id);
 
-    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
-        .title(format!("Sentinel - MON-{}", id))
-        .decorations(false)
-        .always_on_top(true)
-        .transparent(true)
-        .initialization_script(&format!("window.__MONITOR_ID__ = '{}';", id));
-
-    if let Some(m) = monitor {
+    // 모니터 좌표 계산
+    let (lx, ly, lw, lh) = if let Some(m) = monitor {
         let pos = m.position();
         let size = m.size();
         let scale = m.scale_factor();
-        // Use exact monitor bounds instead of fullscreen() so each window
-        // targets the correct monitor in dual-monitor mode.
-        builder = builder
-            .position(pos.x as f64 / scale, pos.y as f64 / scale)
-            .inner_size(size.width as f64 / scale, size.height as f64 / scale);
+        (
+            pos.x as f64 / scale,
+            pos.y as f64 / scale,
+            size.width as f64 / scale,
+            size.height as f64 / scale,
+        )
     } else {
-        builder = builder.fullscreen(true);
+        (0.0, 0.0, 1920.0, 1080.0)
+    };
+
+    // 컨텐츠 창 (투명 오버레이 뒤에 위치, 항상 미리 생성)
+    {
+        let mut builder = WebviewWindowBuilder::new(app, &content_label, WebviewUrl::External("about:blank".parse().unwrap()))
+            .decorations(false)
+            .skip_taskbar(true)
+            .visible(true);
+
+        if monitor.is_some() {
+            builder = builder
+                .position(lx, ly)
+                .inner_size(lw, lh);
+        } else {
+            builder = builder.fullscreen(true);
+        }
+        let _ = builder.build();
     }
 
-    let _ = builder.build();
+    // 컨트롤 오버레이 창 (투명, 항상 위, visible=false → JS 로드 후 show)
+    {
+        let mut builder = WebviewWindowBuilder::new(app, &mon_label, WebviewUrl::App("index.html".into()))
+            .title(format!("Sentinel - MON-{}", id))
+            .decorations(false)
+            .always_on_top(true)
+            .transparent(true)
+            .visible(false) // 백화현상 방지
+            .initialization_script(&format!("window.__MONITOR_ID__ = '{}';", id));
+
+        if monitor.is_some() {
+            builder = builder
+                .position(lx, ly)
+                .inner_size(lw, lh);
+        } else {
+            builder = builder.fullscreen(true);
+        }
+        let _ = builder.build();
+    }
 }
 
 // ── Windows Credential Manager ──
@@ -466,9 +421,8 @@ pub fn run() {
             save_settings,
             get_layout_mode,
             set_layout_mode,
-            sync_content_windows,
-            show_content_window,
-            destroy_content_windows,
+            navigate_content,
+            show_window,
             save_credentials,
             load_credentials,
             has_credentials,
