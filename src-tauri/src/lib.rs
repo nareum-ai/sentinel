@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -26,9 +27,19 @@ struct MonitorSettings {
     layout: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct HoverZone {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
 struct AppState {
     settings: Mutex<HashMap<String, MonitorSettings>>,
     settings_path: PathBuf,
+    hover_zones: Mutex<HashMap<String, Vec<HoverZone>>>,
+    stop_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl AppState {
@@ -38,6 +49,8 @@ impl AppState {
         AppState {
             settings: Mutex::new(settings),
             settings_path: path,
+            hover_zones: Mutex::new(HashMap::new()),
+            stop_flags: Mutex::new(HashMap::new()),
         }
     }
 
@@ -98,10 +111,10 @@ fn set_layout_mode(mode: String, state: State<AppState>, app: AppHandle) {
     }
     state.save();
 
-    // IPC 응답 완료 후 창 전환 — 자기 창을 닫으면서 앱이 꺼지는 버그 방지
+    // IPC 응답 완료 후 창 전환
     let app_handle = app.app_handle().clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(100));
         let handle = app_handle.clone();
         let _ = app_handle.run_on_main_thread(move || {
             launch_windows(&handle, &mode);
@@ -109,10 +122,15 @@ fn set_layout_mode(mode: String, state: State<AppState>, app: AppHandle) {
     });
 }
 
+// JS가 오버레이 창의 인터랙티브 영역을 Rust에 알려주면
+// 폴링 스레드가 커서 위치에 따라 set_ignore_cursor_events를 토글함
+#[tauri::command]
+fn set_hover_zones(monitor_id: String, zones: Vec<HoverZone>, state: State<AppState>) {
+    state.hover_zones.lock().unwrap().insert(monitor_id, zones);
+}
+
 // ── Content window navigation ──
 
-// Content window는 monitor당 1개만 유지하고 URL을 navigate해서 전환
-// → 창 destroy/recreate 없음 → 투명 플래시 없음
 #[tauri::command]
 async fn navigate_content(
     monitor_id: String,
@@ -202,7 +220,6 @@ fn minimize_window(monitor_id: String, app: AppHandle) {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
-    // 모든 WebviewWindow 닫기
     for (_, win) in app.webview_windows() {
         let _ = win.close();
     }
@@ -222,9 +239,10 @@ fn get_layout_mode_str(state: &AppState) -> String {
 }
 
 fn launch_windows(app: &AppHandle, mode: &str) {
+    // destroy()는 동기적으로 즉시 파괴 → close()의 비동기 race 조건 방지
     for (label, win) in app.webview_windows() {
         if label.starts_with("monitor-") || label.starts_with("content-") {
-            let _ = win.close();
+            let _ = win.destroy();
         }
     }
 
@@ -241,11 +259,54 @@ fn launch_windows(app: &AppHandle, mode: &str) {
     }
 }
 
+// 커서가 인터랙티브 존에 있을 때만 오버레이 창이 이벤트를 수신
+// 그 외 영역은 set_ignore_cursor_events(true)로 content 창에 이벤트 전달
+fn start_hover_monitor(app: AppHandle, monitor_id: String) {
+    let stop_flag = {
+        let state = app.state::<AppState>();
+        let mut flags = state.stop_flags.lock().unwrap();
+        if let Some(old) = flags.get(&monitor_id) {
+            old.store(true, Ordering::Relaxed);
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        flags.insert(monitor_id.clone(), flag.clone());
+        flag
+    };
+
+    std::thread::spawn(move || {
+        loop {
+            if stop_flag.load(Ordering::Relaxed) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if stop_flag.load(Ordering::Relaxed) { break; }
+
+            let label = format!("monitor-{}", monitor_id);
+            let Some(win) = app.get_webview_window(&label) else { break; };
+
+            let Ok(cursor) = win.cursor_position() else { continue; };
+            let Ok(win_pos) = win.outer_position() else { continue; };
+            let Ok(scale) = win.scale_factor() else { continue; };
+
+            // 스크린 좌표 → 창 내부 논리 좌표
+            let lx = (cursor.x - win_pos.x as f64) / scale;
+            let ly = (cursor.y - win_pos.y as f64) / scale;
+
+            let in_zone = {
+                let state = app.state::<AppState>();
+                let zones = state.hover_zones.lock().unwrap();
+                zones.get(&monitor_id)
+                    .map(|zs| zs.iter().any(|z| lx >= z.x && lx < z.x + z.w && ly >= z.y && ly < z.y + z.h))
+                    .unwrap_or(false)
+            };
+
+            let _ = win.set_ignore_cursor_events(!in_zone);
+        }
+    });
+}
+
 fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Monitor>) {
     let mon_label = format!("monitor-{}", id);
     let content_label = format!("content-{}", id);
 
-    // 모니터 좌표 계산
     let (lx, ly, lw, lh) = if let Some(m) = monitor {
         let pos = m.position();
         let size = m.size();
@@ -260,7 +321,7 @@ fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Mon
         (0.0, 0.0, 1920.0, 1080.0)
     };
 
-    // 컨텐츠 창 (투명 오버레이 뒤에 위치, 항상 미리 생성)
+    // 컨텐츠 창
     {
         let mut builder = WebviewWindowBuilder::new(app, &content_label, WebviewUrl::External("about:blank".parse().unwrap()))
             .decorations(false)
@@ -277,14 +338,14 @@ fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Mon
         let _ = builder.build();
     }
 
-    // 컨트롤 오버레이 창 (투명, 항상 위, visible=false → JS 로드 후 show)
+    // 컨트롤 오버레이 창
     {
         let mut builder = WebviewWindowBuilder::new(app, &mon_label, WebviewUrl::App("index.html".into()))
             .title(format!("Sentinel - MON-{}", id))
             .decorations(false)
             .always_on_top(true)
             .transparent(true)
-            .visible(false) // 백화현상 방지
+            .visible(false)
             .initialization_script(&format!("window.__MONITOR_ID__ = '{}';", id));
 
         if monitor.is_some() {
@@ -296,6 +357,8 @@ fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Mon
         }
         let _ = builder.build();
     }
+
+    start_hover_monitor(app.clone(), id.to_string());
 }
 
 // ── Windows Credential Manager ──
@@ -425,6 +488,7 @@ pub fn run() {
             save_settings,
             get_layout_mode,
             set_layout_mode,
+            set_hover_zones,
             navigate_content,
             show_window,
             save_credentials,

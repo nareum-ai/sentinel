@@ -315,11 +315,13 @@ async function openCredModal(i) {
     }
   }
   document.getElementById('cred-modal').classList.add('open');
+  updateHoverZones();
 }
 
 function closeCredModal() {
   document.getElementById('cred-modal').classList.remove('open');
   credModalIndex = null;
+  updateHoverZones();
 }
 
 async function saveCred() {
@@ -438,6 +440,7 @@ function toggleSidebar() {
   state.sidebarOpen = !state.sidebarOpen;
   document.getElementById('sidebar').classList.toggle('open', state.sidebarOpen);
   if (state.sidebarOpen) { renderUrlList(); setTimeout(() => document.getElementById('quick-url').focus(), 300); }
+  updateHoverZones();
 }
 
 function renderUrlList() {
@@ -587,6 +590,24 @@ function pasteSubmit() {
   renderUrlList();
 }
 
+// ── Hover Zones (커서 위치에 따라 오버레이 창 이벤트 패스스루 제어) ──
+function updateHoverZones() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const zones = [
+    { x: 0, y: 0, w: W, h: 52 },          // topbar
+    { x: 0, y: H - 24, w: W, h: 24 },     // statusbar
+  ];
+  if (state.sidebarOpen) {
+    zones.push({ x: W - 348, y: 0, w: 348, h: H }); // sidebar (오른쪽)
+  }
+  const modalOpen = !!document.querySelector('.modal-wrap.open');
+  if (modalOpen) {
+    zones.push({ x: 0, y: 0, w: W, h: H }); // 모달 열림 → 전체 캡처
+  }
+  invoke('set_hover_zones', { monitorId: MONITOR_ID, zones }).catch(() => {});
+}
+window.addEventListener('resize', updateHoverZones);
+
 // ── Layout Modal ──
 async function initLayout() {
   const info = await invoke('get_layout_mode');
@@ -602,9 +623,13 @@ function openLayoutModal() {
   document.getElementById('layout-modal').classList.add('open');
   document.getElementById('dual-warn').style.display = state.displayCount < 2 ? 'block' : 'none';
   updateModalSelection();
+  updateHoverZones();
 }
 
-function closeLayoutModal() { document.getElementById('layout-modal').classList.remove('open'); }
+function closeLayoutModal() {
+  document.getElementById('layout-modal').classList.remove('open');
+  updateHoverZones();
+}
 function selectLayout(mode) { state.pendingLayout = mode; updateModalSelection(); }
 function updateModalSelection() {
   document.getElementById('opt-single').classList.toggle('selected', state.pendingLayout === 'single');
@@ -635,6 +660,7 @@ async function loadSettings() {
   resetTimer();
   // 백화현상 방지: 설정 로드 완료 후 창 표시
   await invoke('show_window', { monitorId: MONITOR_ID });
+  updateHoverZones();
 }
 
 function saveSettings() {

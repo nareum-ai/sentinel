@@ -13,14 +13,22 @@
   },
   "devDependencies": {
     "electron": "^41.3.0",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "sharp": "^0.34.5"
   },
   "build": {
     "appId": "com.sentinel.monitor",
     "productName": "Sentinel",
     "compression": "store",
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -28,9 +36,16 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "시스템 모니터링",
-      "installerLanguages": ["ko_KR"],
+      "installerLanguages": [
+        "ko_KR"
+      ],
       "language": "1042"
     },
-    "files": ["main.js", "index.html", "THIRD_PARTY_NOTICES.txt", "node_modules/**/*"]
+    "files": [
+      "main.js",
+      "index.html",
+      "THIRD_PARTY_NOTICES.txt",
+      "node_modules/**/*"
+    ]
   }
 }
