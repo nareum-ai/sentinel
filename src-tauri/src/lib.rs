@@ -202,6 +202,10 @@ fn minimize_window(monitor_id: String, app: AppHandle) {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
+    // 모든 WebviewWindow 닫기
+    for (_, win) in app.webview_windows() {
+        let _ = win.close();
+    }
     app.exit(0);
 }
 
