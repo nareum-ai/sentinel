@@ -319,7 +319,6 @@ fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Mon
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(format!("Sentinel - MON-{}", id))
         .decorations(false)
-        .fullscreen(true)
         .always_on_top(true)
         .transparent(true)
         .initialization_script(&format!("window.__MONITOR_ID__ = '{}';", id));
@@ -327,9 +326,14 @@ fn create_control_window(app: &AppHandle, id: usize, monitor: Option<&tauri::Mon
     if let Some(m) = monitor {
         let pos = m.position();
         let size = m.size();
+        let scale = m.scale_factor();
+        // Use exact monitor bounds instead of fullscreen() so each window
+        // targets the correct monitor in dual-monitor mode.
         builder = builder
-            .position(pos.x as f64, pos.y as f64)
-            .inner_size(size.width as f64, size.height as f64);
+            .position(pos.x as f64 / scale, pos.y as f64 / scale)
+            .inner_size(size.width as f64 / scale, size.height as f64 / scale);
+    } else {
+        builder = builder.fullscreen(true);
     }
 
     let _ = builder.build();
